@@ -90,6 +90,20 @@ docker-compose.yml          local n8n with the env flags this needs
    ```
 8. **Point Paystack at it.** To receive real test-mode webhooks, expose port 5678 with a tunnel (for example `cloudflared tunnel --url http://localhost:5678`) and paste `https://<tunnel>/webhook/paystack-webhook` into Paystack: *Settings → API Keys & Webhooks → Test Webhook URL*.
 
+## Verified
+
+Tested on **n8n 1.123.92** (the version pinned in `docker-compose.yml`):
+
+| Check | Result |
+| --- | --- |
+| Both workflows import with `n8n import:workflow` | Pass |
+| Webhook workflow activates and registers `/webhook/paystack-webhook` | Pass |
+| Correctly signed `charge.success` → verified, normalised (₦25,000, customer name and email), routed to the Airtable duplicate check | Pass |
+| Tampered signature → rejected as `bad_signature`, routed to the Slack alert, never reaches Airtable | Pass |
+| Signature logic unit tests (`npm test`): SHA-256 mistake, re-serialised JSON, wrong key, tampered body, missing header | 10/10 pass |
+
+The Airtable, SMTP and Slack steps need your own accounts; follow *Run it locally* to exercise them end to end.
+
 ## Known limitations
 
 - **Near-simultaneous duplicates.** Airtable has no unique constraint. If Paystack delivered the same event twice within the same second, both could pass the duplicate check before either row is written. In practice Paystack's retries are minutes apart. A production version under heavy load would put the idempotency check in a store with a real unique key (Postgres, Redis `SET NX`).
