@@ -1,0 +1,689 @@
+{
+  "name": "Paystack: Payment Webhook",
+  "nodes": [
+    {
+      "id": "wh",
+      "name": "Paystack Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        300
+      ],
+      "webhookId": "paystack-webhook",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "paystack-webhook",
+        "responseMode": "onReceived",
+        "options": {
+          "rawBody": true
+        }
+      }
+    },
+    {
+      "id": "verify",
+      "name": "Verify Signature & Normalize",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        300
+      ],
+      "parameters": {
+        "jsCode": "// n8n Code node: \"Verify Signature & Normalize\"\n// Mode: Run Once for All Items\n//\n// Requires on the n8n instance (see docker-compose.yml):\n//   NODE_FUNCTION_ALLOW_BUILTIN=crypto     -> lets the Code node require('crypto')\n//   N8N_BLOCK_ENV_ACCESS_IN_NODE=false     -> lets the Code node read $env\n//   PAYSTACK_SECRET_KEY=sk_test_...        -> your Paystack TEST secret key\n//\n// The Webhook node must have \"Raw Body\" enabled so the exact bytes Paystack\n// sent are available as binary property `data`. We never re-serialise JSON\n// to verify: if the raw body is missing we fail closed.\n\nconst crypto = require('crypto');\nconst secret = $env.PAYSTACK_SECRET_KEY;\nconst items = $input.all();\nconst results = [];\n\nfor (let i = 0; i < items.length; i++) {\n  const item = items[i];\n  const headers = item.json.headers || {};\n  const signature = headers['x-paystack-signature'];\n\n  const reject = (reason) =>\n    results.push({ json: { valid: false, reason, receivedAt: new Date().toISOString() } });\n\n  if (!secret) { reject('secret_not_configured'); continue; }\n  if (!signature) { reject('missing_signature'); continue; }\n  if (!item.binary || !item.binary.data) { reject('raw_body_missing'); continue; }\n\n  const raw = await this.helpers.getBinaryDataBuffer(i, 'data');\n  const expected = crypto.createHmac('sha512', secret).update(raw).digest('hex');\n  const a = Buffer.from(expected, 'utf8');\n  const b = Buffer.from(String(signature).trim().toLowerCase(), 'utf8');\n\n  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {\n    reject('bad_signature');\n    continue;\n  }\n\n  let event;\n  try {\n    event = JSON.parse(raw.toString('utf8'));\n  } catch (e) {\n    reject('invalid_json');\n    continue;\n  }\n\n  const d = event.data || {};\n  if (!d.reference) { reject('missing_reference'); continue; }\n\n  results.push({\n    json: {\n      valid: true,\n      event: event.event,\n      reference: d.reference,\n      status: d.status,\n      amount: Number(d.amount) / 100, // kobo -> naira\n      currency: d.currency,\n      channel: d.channel || null,\n      paidAt: d.paid_at || d.paidAt || null,\n      customerEmail: (d.customer && d.customer.email) || null,\n      customerName:\n        [d.customer && d.customer.first_name, d.customer && d.customer.last_name]\n          .filter(Boolean)\n          .join(' ') || null,\n      gatewayResponse: d.gateway_response || null,\n    },\n  });\n}\n\nreturn results;\n"
+      }
+    },
+    {
+      "id": "ifvalid",
+      "name": "Signature Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        440,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "ifvalid-c1",
+              "leftValue": "={{ $json.valid }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "slackreject",
+      "name": "Alert: Rejected Webhook",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        660,
+        520
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SLACK_WEBHOOK_URL }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ text: `:no_entry: Rejected Paystack webhook (${$json.reason}) at ${$json.receivedAt}` }) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "ifcharge",
+      "name": "Is charge.success?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        660,
+        200
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "ifcharge-c1",
+              "leftValue": "={{ $json.event }}",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              },
+              "rightValue": "charge.success"
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "ignore",
+      "name": "Ignore Other Events",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        880,
+        380
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "find",
+      "name": "Find Existing Payment",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [
+        880,
+        120
+      ],
+      "alwaysOutputData": true,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "REPLACE_ME",
+          "name": "Airtable account"
+        }
+      },
+      "parameters": {
+        "operation": "search",
+        "base": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $env.AIRTABLE_BASE_ID }}"
+        },
+        "table": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $env.AIRTABLE_PAYMENTS_TABLE_ID }}"
+        },
+        "filterByFormula": "={Reference} = '{{ $json.reference }}'",
+        "returnAll": false,
+        "limit": 1,
+        "options": {}
+      }
+    },
+    {
+      "id": "ifdup",
+      "name": "Already Logged?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1100,
+        120
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "ifdup-c1",
+              "leftValue": "={{ $json.id }}",
+              "operator": {
+                "type": "string",
+                "operation": "exists",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "dup",
+      "name": "Duplicate: Skip",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1320,
+        0
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "create",
+      "name": "Log Sale in Airtable",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [
+        1320,
+        220
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueErrorOutput",
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "REPLACE_ME",
+          "name": "Airtable account"
+        }
+      },
+      "parameters": {
+        "operation": "create",
+        "base": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $env.AIRTABLE_BASE_ID }}"
+        },
+        "table": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $env.AIRTABLE_PAYMENTS_TABLE_ID }}"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Reference": "={{ $('Verify Signature & Normalize').first().json.reference }}",
+            "Status": "Success",
+            "Amount": "={{ $('Verify Signature & Normalize').first().json.amount }}",
+            "Currency": "={{ $('Verify Signature & Normalize').first().json.currency }}",
+            "Channel": "={{ $('Verify Signature & Normalize').first().json.channel }}",
+            "Customer Email": "={{ $('Verify Signature & Normalize').first().json.customerEmail }}",
+            "Customer Name": "={{ $('Verify Signature & Normalize').first().json.customerName }}",
+            "Paid At": "={{ $('Verify Signature & Normalize').first().json.paidAt }}",
+            "Gateway Response": "={{ $('Verify Signature & Normalize').first().json.gatewayResponse }}",
+            "Follow-up": "Not needed",
+            "Source": "Webhook"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "Reference",
+              "displayName": "Reference",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "Status",
+              "displayName": "Status",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "Amount",
+              "displayName": "Amount",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "number",
+              "removed": false
+            },
+            {
+              "id": "Currency",
+              "displayName": "Currency",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "Channel",
+              "displayName": "Channel",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "Customer Email",
+              "displayName": "Customer Email",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "Customer Name",
+              "displayName": "Customer Name",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "Paid At",
+              "displayName": "Paid At",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "Gateway Response",
+              "displayName": "Gateway Response",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "Follow-up",
+              "displayName": "Follow-up",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "Source",
+              "displayName": "Source",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": true,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "typecast": true
+        }
+      }
+    },
+    {
+      "id": "email",
+      "name": "Send Receipt",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        1540,
+        120
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueErrorOutput",
+      "credentials": {
+        "smtp": {
+          "id": "REPLACE_ME",
+          "name": "SMTP account"
+        }
+      },
+      "parameters": {
+        "fromEmail": "={{ $env.RECEIPT_FROM_EMAIL }}",
+        "toEmail": "={{ $('Verify Signature & Normalize').first().json.customerEmail }}",
+        "subject": "=Receipt for your payment of {{ $('Verify Signature & Normalize').first().json.currency }} {{ $('Verify Signature & Normalize').first().json.amount.toLocaleString() }}",
+        "emailFormat": "html",
+        "html": "=<p>Hi {{ $('Verify Signature & Normalize').first().json.customerName || 'there' }},</p>\n<p>Thank you for your payment. Here are the details:</p>\n<ul>\n  <li><strong>Amount:</strong> {{ $('Verify Signature & Normalize').first().json.currency }} {{ $('Verify Signature & Normalize').first().json.amount.toLocaleString() }}</li>\n  <li><strong>Reference:</strong> {{ $('Verify Signature & Normalize').first().json.reference }}</li>\n  <li><strong>Paid via:</strong> {{ $('Verify Signature & Normalize').first().json.channel }}</li>\n  <li><strong>Date:</strong> {{ $('Verify Signature & Normalize').first().json.paidAt }}</li>\n</ul>\n<p>Keep this email as your receipt.</p>",
+        "options": {}
+      }
+    },
+    {
+      "id": "tick",
+      "name": "Mark Receipt Sent",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [
+        1760,
+        40
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "REPLACE_ME",
+          "name": "Airtable account"
+        }
+      },
+      "parameters": {
+        "operation": "update",
+        "base": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $env.AIRTABLE_BASE_ID }}"
+        },
+        "table": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $env.AIRTABLE_PAYMENTS_TABLE_ID }}"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "id": "={{ $('Log Sale in Airtable').first().json.id }}",
+            "Receipt Sent": "={{ true }}"
+          },
+          "matchingColumns": [
+            "id"
+          ],
+          "schema": [
+            {
+              "id": "id",
+              "displayName": "id",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "Receipt Sent",
+              "displayName": "Receipt Sent",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "boolean",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": true,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "typecast": true
+        }
+      }
+    },
+    {
+      "id": "slacksale",
+      "name": "Notify Team: New Sale",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1980,
+        40
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SLACK_WEBHOOK_URL }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ text: `:moneybag: New payment: ${$('Verify Signature & Normalize').first().json.currency} ${$('Verify Signature & Normalize').first().json.amount.toLocaleString()} from ${$('Verify Signature & Normalize').first().json.customerName || $('Verify Signature & Normalize').first().json.customerEmail} (ref ${$('Verify Signature & Normalize').first().json.reference})` }) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "slackemailfail",
+      "name": "Alert: Receipt Failed",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1760,
+        220
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SLACK_WEBHOOK_URL }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ text: `:warning: Sale logged but receipt email failed for ref ${$('Verify Signature & Normalize').first().json.reference} (${$('Verify Signature & Normalize').first().json.customerEmail}). Send it manually.` }) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "slacklogfail",
+      "name": "Alert: Could Not Log Sale",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1540,
+        380
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SLACK_WEBHOOK_URL }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ text: `:rotating_light: Payment received but Airtable write failed after 3 tries. Ref ${$('Verify Signature & Normalize').first().json.reference}, ${$('Verify Signature & Normalize').first().json.currency} ${$('Verify Signature & Normalize').first().json.amount}. Check Airtable and log it manually.` }) }}",
+        "options": {}
+      }
+    }
+  ],
+  "connections": {
+    "Paystack Webhook": {
+      "main": [
+        [
+          {
+            "node": "Verify Signature & Normalize",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify Signature & Normalize": {
+      "main": [
+        [
+          {
+            "node": "Signature Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Signature Valid?": {
+      "main": [
+        [
+          {
+            "node": "Is charge.success?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Alert: Rejected Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is charge.success?": {
+      "main": [
+        [
+          {
+            "node": "Find Existing Payment",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Ignore Other Events",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find Existing Payment": {
+      "main": [
+        [
+          {
+            "node": "Already Logged?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Already Logged?": {
+      "main": [
+        [
+          {
+            "node": "Duplicate: Skip",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Sale in Airtable",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Sale in Airtable": {
+      "main": [
+        [
+          {
+            "node": "Send Receipt",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Alert: Could Not Log Sale",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Receipt": {
+      "main": [
+        [
+          {
+            "node": "Mark Receipt Sent",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Alert: Receipt Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark Receipt Sent": {
+      "main": [
+        [
+          {
+            "node": "Notify Team: New Sale",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "active": false
+}

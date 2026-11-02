@@ -1,0 +1,20 @@
+services:
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:latest
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    env_file: .env
+    environment:
+      # Let the Code node use Node's crypto module (needed for HMAC-SHA512)
+      - NODE_FUNCTION_ALLOW_BUILTIN=crypto
+      # Let nodes read the variables from .env via $env
+      - N8N_BLOCK_ENV_ACCESS_IN_NODE=false
+      - TZ=${GENERIC_TIMEZONE:-Africa/Lagos}
+      - GENERIC_TIMEZONE=${GENERIC_TIMEZONE:-Africa/Lagos}
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./workflows:/workflows:ro
+
+volumes:
+  n8n_data:

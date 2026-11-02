@@ -1,0 +1,40 @@
+{
+  "event": "charge.success",
+  "data": {
+    "id": 4099260516,
+    "domain": "test",
+    "status": "success",
+    "reference": "demo-ref-0001",
+    "amount": 2500000,
+    "message": null,
+    "gateway_response": "Successful",
+    "paid_at": "2026-11-02T10:15:42.000Z",
+    "created_at": "2026-11-02T10:15:30.000Z",
+    "channel": "card",
+    "currency": "NGN",
+    "ip_address": "102.89.0.1",
+    "metadata": { "plan": "Pro Monthly" },
+    "fees": 47500,
+    "customer": {
+      "id": 1234567,
+      "first_name": "Ada",
+      "last_name": "Okafor",
+      "email": "ada.okafor@example.com",
+      "customer_code": "CUS_demo0001",
+      "phone": null
+    },
+    "authorization": {
+      "authorization_code": "AUTH_demo0001",
+      "bin": "408408",
+      "last4": "4081",
+      "exp_month": "12",
+      "exp_year": "2030",
+      "channel": "card",
+      "card_type": "visa",
+      "bank": "TEST BANK",
+      "country_code": "NG",
+      "brand": "visa",
+      "reusable": true
+    }
+  }
+}

@@ -1,0 +1,396 @@
+{
+  "name": "Paystack: Daily Failed-Charge Sweep",
+  "nodes": [
+    {
+      "id": "sched",
+      "name": "Every Day 8am",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        300
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "triggerAtHour": 8
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "list",
+      "name": "List Failed Charges (24h)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        220,
+        300
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "parameters": {
+        "method": "GET",
+        "url": "https://api.paystack.co/transaction",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "status",
+              "value": "failed"
+            },
+            {
+              "name": "perPage",
+              "value": "100"
+            },
+            {
+              "name": "from",
+              "value": "={{ $now.minus({ days: 1 }).toISO() }}"
+            },
+            {
+              "name": "to",
+              "value": "={{ $now.toISO() }}"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.PAYSTACK_SECRET_KEY }}"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "split",
+      "name": "One Item per Failed Charge",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        300
+      ],
+      "parameters": {
+        "jsCode": "// n8n Code node: \"One Item per Failed Charge\"\n// Mode: Run Once for All Items\n//\n// Input: one item, the Paystack \"List Transactions\" response\n//   { status: true, message: \"...\", data: [ ...transactions ], meta: {...} }\n// Output: one item per failed transaction, or a single { none: true } item\n// so the IF node downstream can stop cleanly on quiet days.\n\nconst response = $input.first().json;\nconst transactions = Array.isArray(response.data) ? response.data : [];\n\nif (transactions.length === 0) {\n  return [{ json: { none: true } }];\n}\n\nreturn transactions.map((t) => ({\n  json: {\n    none: false,\n    reference: t.reference,\n    amount: Number(t.amount) / 100, // kobo -> naira\n    currency: t.currency,\n    channel: t.channel || null,\n    paidAt: t.paid_at || t.paidAt || t.created_at || t.createdAt || null,\n    customerEmail: (t.customer && t.customer.email) || null,\n    customerName:\n      [t.customer && t.customer.first_name, t.customer && t.customer.last_name]\n        .filter(Boolean)\n        .join(' ') || null,\n    gatewayResponse: t.gateway_response || null,\n  },\n}));\n"
+      }
+    },
+    {
+      "id": "ifany",
+      "name": "Any Failures?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        660,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "ifany-c1",
+              "leftValue": "={{ $json.none }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "false",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "upsert",
+      "name": "Upsert Failed Charge",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [
+        880,
+        200
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "REPLACE_ME",
+          "name": "Airtable account"
+        }
+      },
+      "parameters": {
+        "operation": "upsert",
+        "base": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $env.AIRTABLE_BASE_ID }}"
+        },
+        "table": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $env.AIRTABLE_PAYMENTS_TABLE_ID }}"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Reference": "={{ $json.reference }}",
+            "Status": "Failed",
+            "Amount": "={{ $json.amount }}",
+            "Currency": "={{ $json.currency }}",
+            "Channel": "={{ $json.channel }}",
+            "Customer Email": "={{ $json.customerEmail }}",
+            "Customer Name": "={{ $json.customerName }}",
+            "Paid At": "={{ $json.paidAt }}",
+            "Gateway Response": "={{ $json.gatewayResponse }}",
+            "Follow-up": "Needed",
+            "Source": "Daily sweep"
+          },
+          "matchingColumns": [
+            "Reference"
+          ],
+          "schema": [
+            {
+              "id": "Reference",
+              "displayName": "Reference",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "Status",
+              "displayName": "Status",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "Amount",
+              "displayName": "Amount",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "number",
+              "removed": false
+            },
+            {
+              "id": "Currency",
+              "displayName": "Currency",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "Channel",
+              "displayName": "Channel",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "Customer Email",
+              "displayName": "Customer Email",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "Customer Name",
+              "displayName": "Customer Name",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "Paid At",
+              "displayName": "Paid At",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "Gateway Response",
+              "displayName": "Gateway Response",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "Follow-up",
+              "displayName": "Follow-up",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "Source",
+              "displayName": "Source",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": true,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "typecast": true
+        }
+      }
+    },
+    {
+      "id": "summary",
+      "name": "Build Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        200
+      ],
+      "parameters": {
+        "jsCode": "const charges = $('One Item per Failed Charge').all().map((i) => i.json);\nconst total = charges.reduce((s, c) => s + c.amount, 0);\nconst lines = charges\n  .slice(0, 10)\n  .map((c) => `• ${c.currency} ${c.amount.toLocaleString()}: ${c.customerEmail || 'unknown'} (${c.gatewayResponse || 'no reason'})`);\nconst more = charges.length > 10 ? `\\n…and ${charges.length - 10} more in Airtable.` : '';\nreturn [{ json: { text: `:warning: ${charges.length} failed charge(s) in the last 24h, worth NGN ${total.toLocaleString()}. Marked \"Needed\" in Airtable.\\n${lines.join('\\n')}${more}` } }];"
+      },
+      "executeOnce": true
+    },
+    {
+      "id": "slacksummary",
+      "name": "Post Summary to Slack",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1320,
+        200
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SLACK_WEBHOOK_URL }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ text: $json.text }) }}",
+        "options": {}
+      }
+    }
+  ],
+  "connections": {
+    "Every Day 8am": {
+      "main": [
+        [
+          {
+            "node": "List Failed Charges (24h)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List Failed Charges (24h)": {
+      "main": [
+        [
+          {
+            "node": "One Item per Failed Charge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "One Item per Failed Charge": {
+      "main": [
+        [
+          {
+            "node": "Any Failures?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Any Failures?": {
+      "main": [
+        [
+          {
+            "node": "Upsert Failed Charge",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Upsert Failed Charge": {
+      "main": [
+        [
+          {
+            "node": "Build Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Summary": {
+      "main": [
+        [
+          {
+            "node": "Post Summary to Slack",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "active": false
+}

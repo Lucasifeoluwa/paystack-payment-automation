@@ -1,0 +1,17 @@
+{
+  "name": "paystack-payment-automation",
+  "version": "1.0.0",
+  "description": "n8n + Airtable automation for Paystack payments: verified webhooks, idempotent sales logging, receipts, Slack alerts and a daily failed-charge sweep.",
+  "private": true,
+  "license": "MIT",
+  "author": "Lucas Ifeoluwa",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "send": "node scripts/send-test-webhook.js",
+    "send:duplicate": "node scripts/send-test-webhook.js --duplicate",
+    "send:bad": "node scripts/send-test-webhook.js --bad-signature"
+  }
+}
